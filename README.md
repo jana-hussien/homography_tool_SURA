@@ -1,8 +1,10 @@
 # Thermal Camera Calibration Tool
 
-A PyQt5 desktop tool for finding the homography between adjacent cameras in a
-6-camera ultra-low-resolution thermal wearable rig, and for stitching all six
-views into a single panorama.
+A PyQt5 desktop tool for finding the homography between pairs of cameras in a
+multi-camera ultra-low-resolution thermal wearable rig, and for applying those
+calibrations to a real, synchronized capture session — stitching the
+cameras that have a calibrated neighbor into one or more panoramas, shown
+alongside the unprocessed RGB frame.
 
 ## Install
 
@@ -15,68 +17,119 @@ pip install -r requirements.txt
 
 ## Expected data layout
 
+**Calibration recordings** (one short hand-wave recording per camera pair,
+used only to compute a homography): each pair folder contains the raw
+`data_capture_<port>_<frame>_<timestamp>.json` files for exactly two camera
+ports, e.g.:
+
 ```
-data/
-  pair_1_2/
-    cam1/
-      frame_0001.png
-      frame_0002.png
-      ...
-    cam2/
-      frame_0001.png
-      ...
-  pair_2_3/
-    cam2/
-    cam3/
-  ...
+thermal_pairs/
+  23/
+    data_capture_2_0_....json
+    data_capture_3_0_....json
+    ...
+  45/
+    data_capture_4_0_....json
+    data_capture_5_0_....json
+    ...
 ```
 
-Each pair folder must contain exactly two camera subfolders. Frame N in one
-camera's folder is assumed to correspond to frame N in the other camera's
-folder within the same pair.
+The folder can be named anything — the tool detects which two camera ports
+are present from the filenames themselves, not the folder name. Frame N for
+one camera is assumed to correspond to frame N for the other camera within
+the same pair folder.
+
+**Real capture session** (the actual footage you want to stitch, not
+calibration footage): a folder with the capture JSONs for all camera ports
+in one place, plus optionally an RGB folder and a `sync.csv` mapping each
+thermal frame index to its corresponding RGB filename:
+
+```
+latest-capture/
+  thermal/
+    data_capture_2_0_....json
+    data_capture_3_0_....json
+    data_capture_4_0_....json
+    ...
+  rgb/
+    rgb_capture_0_0_....jpg
+    ...
+  sync/
+    sync.csv
+```
 
 ## Usage
-
-### 1. Calibrate a single pair
 
 ```bash
 python main.py
 ```
 
-1. Select a `pair_X_Y/` folder when prompted (or via "Open Pair Folder").
+### 1. Calibrate a camera pair
+
+1. Click "Open Pair Folder" and select a pair folder (e.g. `thermal_pairs/23`).
 2. Scrub through frames with the slider, arrow keys, or Play/Pause (10 fps)
    until you find a frame where the hand-wave is visible in both cameras'
    overlapping field of view.
-3. Click "Select Cam A Overlap", then click 4 points on the Cam A image in
+3. If the two cameras loaded as the wrong A/B orientation (e.g. you want the
+   physically "later" camera in your rig's chain to be Cam A), click "Swap
+   Cam A / Cam B" first — this swaps which camera's frames/labels are A vs
+   B and clears any existing quad selections, since they're orientation
+   specific.
+4. Click "Select Cam A Overlap", then click 4 points on the Cam A image in
    order: top-left, top-right, bottom-right, bottom-left. Repeat with
    "Select Cam B Overlap" on the Cam B image, in the same corner order.
-4. Once both quads show "defined", click "Compute Homography". The 3x3
-   matrix is shown in the panel.
-5. Toggle "Show Warped Preview" to see Cam A warped into Cam B's frame and
-   alpha-blended, and scrub through frames to sanity-check alignment.
-6. Click "Save Homography" to write `pair_X_Y_homography.json` and
-   `pair_X_Y_H.npy` into the pair folder.
-7. Click "Generate Example Images" to write 5 evenly-spaced sample frames
+5. Once both quads show "defined", click "Compute Homography". The 3x3
+   matrix is shown in the panel (or paste/edit one directly and click "Apply
+   Typed Matrix").
+6. Toggle "Show Stitched Preview" to see Cam A warped into Cam B's frame and
+   blended, and scrub through frames to sanity-check alignment.
+7. Click "Save Homography" to write `<camA><camB>_homography.json` and
+   `<camA><camB>_H.npy` into the pair folder (e.g. `23_homography.json`).
+8. Click "Generate Example Images" to write 5 evenly-spaced sample frames
    (original side-by-side, warped+blended, and stitched-pair panorama) to an
    `examples/` subfolder of the pair folder.
 
-Repeat for every adjacent pair (`pair_1_2`, `pair_2_3`, ..., `pair_5_6`).
+Repeat for every camera pair you want calibrated. Only pairs with real,
+overlapping fields of view should be calibrated — chaining a homography
+between non-overlapping cameras produces a degenerate, visibly distorted
+transform.
 
-### 2. Stitch all six cameras
+### 2. Stitch a real capture session + RGB
 
-1. Click "Stitch All Pairs..." in the main window.
-2. Select the root folder that contains all `pair_*` subfolders (each must
-   already have a saved homography JSON from step 1).
-3. Scrub the slider to choose a synchronized frame index; the full 6-camera
-   panorama preview updates live, using Cam 1 as the reference frame and
-   chaining homographies across all pairs.
-4. Use "Save Current Panorama" or "Save All Frames" to write PNGs to a
-   `stitched_output/` folder under the root folder.
+Click "Stitch Real Capture + RGB..." to open a separate window. This applies
+the homographies you saved in step 1 to the *real* synchronized footage,
+rather than to the mismatched calibration recordings themselves:
+
+1. "Select Thermal Capture Folder..." — the folder with the real session's
+   capture JSONs for all cameras.
+2. "Select Homography Folder..." — a folder searched recursively for every
+   `*_homography.json` (e.g. point it at `thermal_pairs/` to pick up all
+   saved pairs at once).
+3. Cameras are grouped into clusters by following whichever pairwise
+   homographies are available — two cameras end up in the same panorama
+   only if there's a chain of calibrated pairs connecting them. A camera
+   with no calibrated neighbor is shown on its own, unstitched, and the
+   status line lists which camera(s) that applies to.
+4. Click "Reorder Cameras..." to control which camera is each cluster's
+   reference frame — drag a camera to the top of its group. Picking a
+   camera in the middle of a chain (rather than at one end) roughly halves
+   the number of homographies chained together, which reduces the
+   distortion that compounds across a long chain.
+5. Optionally select an RGB folder and the session's `sync.csv` to show the
+   matching RGB frame alongside the thermal panorama(s), displayed exactly
+   as recorded (no processing).
+6. Scrub the slider, or use Play/Pause, to step through synchronized frames.
+   Each cluster is displayed as a JET heatmap (areas with no camera coverage
+   stay black).
+7. "Save Current Merged Frame" / "Save All Merged Frames" write the actual
+   stitched **float temperature data** (not the heatmap image) as `.npy`
+   files to `<capture_folder>/stitched_output/`, named by which cameras are
+   in that cluster, e.g. `cam2+cam3+cam5+cam4+cam6_frame_0001.npy`.
 
 ## Keyboard shortcuts
 
-- Left / Right arrow: step one frame back / forward
-- Play/Pause button: auto-advance at ~10 fps
+- Left / Right arrow: step one frame back / forward (main calibration window)
+- Play/Pause button: auto-advance at ~10 fps (both windows)
 
 ## File structure
 
@@ -84,13 +137,18 @@ Repeat for every adjacent pair (`pair_1_2`, `pair_2_3`, ..., `pair_5_6`).
 thermal_calibration/
   main.py             # MainWindow: pair loading, scrubbing, quad selection, save/export
   ui/
-    viewer.py          # ImageViewer: upscaled display + quad click capture/overlay
+    viewer.py          # ImageViewer (grayscale or heatmapped color, with size capping
+                        #   and optional quad click capture) and RGBViewer (raw RGB display)
     controls.py        # ControlPanel: buttons, status labels, H matrix display
-    stitch_window.py   # StitchWindow: multi-pair homography chaining + panorama preview
+    stitch_window.py   # OrderCamerasDialog + CaptureStitchWindow: applies saved
+                        #   homographies to a real capture session, clusters cameras by
+                        #   connectivity, heatmap preview, float .npy export
   core/
     homography.py       # compute_homography, warp_image, blend_images
-    stitcher.py          # homography chaining and multi-camera panorama stitching
-    io_utils.py          # frame loading, folder detection, JSON/npy save/load
+    stitcher.py          # build_clusters (groups cameras via available homographies)
+                          #   and stitch_frames (dtype-generic: uint8 display or float32 temps)
+    io_utils.py           # frame loading, camera/homography discovery, sync.csv parsing,
+                           #   JSON/npy save/load
   examples/              # scaffold placeholder (runtime examples are written per-pair)
   requirements.txt
   README.md

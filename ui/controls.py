@@ -13,7 +13,8 @@ class ControlPanel(QWidget):
     apply_matrix_clicked = pyqtSignal()
     save_clicked = pyqtSignal()
     generate_examples_clicked = pyqtSignal()
-    stitch_mode_clicked = pyqtSignal()
+    capture_stitch_mode_clicked = pyqtSignal()
+    swap_cameras_clicked = pyqtSignal()
     play_toggled = pyqtSignal(bool)
     preview_toggled = pyqtSignal(bool)
 
@@ -31,6 +32,10 @@ class ControlPanel(QWidget):
 
         quad_group = QGroupBox("Overlap Selection")
         quad_layout = QVBoxLayout(quad_group)
+
+        self.swap_button = QPushButton("Swap Cam A / Cam B")
+        self.swap_button.clicked.connect(self.swap_cameras_clicked.emit)
+        quad_layout.addWidget(self.swap_button)
 
         row_a = QHBoxLayout()
         self.select_a_button = QPushButton("Select Cam A Overlap")
@@ -99,9 +104,10 @@ class ControlPanel(QWidget):
 
         stitch_group = QGroupBox("Panorama")
         stitch_layout = QVBoxLayout(stitch_group)
-        self.stitch_button = QPushButton("Stitch All Pairs...")
-        self.stitch_button.clicked.connect(self.stitch_mode_clicked.emit)
-        stitch_layout.addWidget(self.stitch_button)
+        self.capture_stitch_button = QPushButton("Stitch Real Capture + RGB...")
+        self.capture_stitch_button.clicked.connect(self.capture_stitch_mode_clicked.emit)
+        stitch_layout.addWidget(self.capture_stitch_button)
+
         layout.addWidget(stitch_group)
 
         layout.addStretch()

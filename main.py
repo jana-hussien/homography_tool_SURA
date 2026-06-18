@@ -1,3 +1,4 @@
+import re
 import sys
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from core.io_utils import (
     save_homography, temps_to_uint8,
 )
 from ui.controls import ControlPanel
-from ui.stitch_window import StitchWindow
+from ui.stitch_window import CaptureStitchWindow
 from ui.viewer import ImageViewer
 
 DISPLAY_SCALE = 12
@@ -43,7 +44,6 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self.setFocusPolicy(Qt.StrongFocus)
-        self.open_pair_folder()
 
     def _build_ui(self):
         central = QWidget()
@@ -69,7 +69,7 @@ class MainWindow(QMainWindow):
         images_layout.addWidget(self.viewer_b)
         viewers_layout.addLayout(images_layout)
 
-        self.preview_viewer = ImageViewer(scale_factor=DISPLAY_SCALE)
+        self.preview_viewer = ImageViewer(scale_factor=DISPLAY_SCALE, max_width=800, max_height=400)
         self.preview_viewer.setVisible(False)
         viewers_layout.addWidget(self.preview_viewer)
 
@@ -88,11 +88,12 @@ class MainWindow(QMainWindow):
         self.control_panel.select_b_clicked.connect(self.start_select_b)
         self.control_panel.clear_a_clicked.connect(self.clear_quad_a)
         self.control_panel.clear_b_clicked.connect(self.clear_quad_b)
+        self.control_panel.swap_cameras_clicked.connect(self.on_swap_cameras_clicked)
         self.control_panel.compute_clicked.connect(self.on_compute_clicked)
         self.control_panel.apply_matrix_clicked.connect(self.on_apply_matrix_clicked)
         self.control_panel.save_clicked.connect(self.on_save_clicked)
         self.control_panel.generate_examples_clicked.connect(self.on_generate_examples_clicked)
-        self.control_panel.stitch_mode_clicked.connect(self.open_stitch_window)
+        self.control_panel.capture_stitch_mode_clicked.connect(self.open_capture_stitch_window)
         self.control_panel.play_toggled.connect(self.on_play_toggled)
         self.control_panel.preview_toggled.connect(self.on_preview_toggled)
         body_layout.addWidget(self.control_panel)
@@ -123,7 +124,7 @@ class MainWindow(QMainWindow):
         self.norm_b = compute_normalization_range(self.cam_b_grids)
 
         self.pair_folder = pair_folder
-        self.pair_name = f"pair_{cam_a_id}_{cam_b_id}"
+        self.pair_name = f"{cam_a_id}{cam_b_id}"
         self.cam_a_name = f"cam{cam_a_id}"
         self.cam_b_name = f"cam{cam_b_id}"
         self.frame_count = min(len(self.cam_a_grids), len(self.cam_b_grids))
@@ -202,6 +203,34 @@ class MainWindow(QMainWindow):
             self.show_frame(self.current_idx + 1)
         else:
             super().keyPressEvent(event)
+
+    # ---- camera ordering ----
+
+    def on_swap_cameras_clicked(self):
+        if self.frame_count == 0:
+            return
+        self.cam_a_name, self.cam_b_name = self.cam_b_name, self.cam_a_name
+        self.cam_a_grids, self.cam_b_grids = self.cam_b_grids, self.cam_a_grids
+        self.norm_a, self.norm_b = self.norm_b, self.norm_a
+
+        cam_a_id = int(re.search(r"\d+", self.cam_a_name).group())
+        cam_b_id = int(re.search(r"\d+", self.cam_b_name).group())
+        self.pair_name = f"{cam_a_id}{cam_b_id}"
+
+        # The quads and homography were defined for the previous A/B
+        # orientation and no longer apply.
+        self.H = None
+        self.viewer_a.clear_quad()
+        self.viewer_b.clear_quad()
+        self.preview_viewer.setVisible(False)
+        self.control_panel.preview_button.setChecked(False)
+        self.control_panel.set_status_a(False)
+        self.control_panel.set_status_b(False)
+        self.control_panel.set_compute_enabled(False)
+        self.control_panel.set_post_compute_enabled(False)
+        self.control_panel.set_matrix_text(None)
+
+        self.show_frame(self.current_idx)
 
     # ---- quad selection ----
 
@@ -383,8 +412,8 @@ class MainWindow(QMainWindow):
 
     # ---- panorama stitching mode ----
 
-    def open_stitch_window(self):
-        dialog = StitchWindow(self)
+    def open_capture_stitch_window(self):
+        dialog = CaptureStitchWindow(self)
         dialog.exec_()
 
 

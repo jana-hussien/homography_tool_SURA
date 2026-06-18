@@ -10,7 +10,10 @@ class ImageViewer(QLabel):
 
     quad_completed = pyqtSignal(list)
 
-    def __init__(self, scale_factor=12, overlay_color=QColor(255, 80, 0), parent=None):
+    def __init__(
+        self, scale_factor=12, overlay_color=QColor(255, 80, 0), parent=None,
+        max_width=None, max_height=None,
+    ):
         super().__init__(parent)
         self.scale_factor = scale_factor
         self.overlay_color = overlay_color
@@ -18,6 +21,11 @@ class ImageViewer(QLabel):
         self.selecting = False
         self.in_progress_points = []
         self.completed_quad = None
+        # Caps the displayed size, scaling down instead of letting the
+        # pixmap overflow past the window edge (only safe for viewers that
+        # don't need pixel-exact click mapping, i.e. not quad selection).
+        self.max_width = max_width
+        self.max_height = max_height
         self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet("background-color: #111;")
 
@@ -55,15 +63,30 @@ class ImageViewer(QLabel):
             (w * self.scale_factor, h * self.scale_factor),
             interpolation=cv2.INTER_NEAREST,
         )
-        qimg = QImage(
-            upscaled.data, upscaled.shape[1], upscaled.shape[0],
-            upscaled.strides[0], QImage.Format_Grayscale8,
-        ).copy()
+        if upscaled.ndim == 2:
+            qimg = QImage(
+                upscaled.data, upscaled.shape[1], upscaled.shape[0],
+                upscaled.strides[0], QImage.Format_Grayscale8,
+            ).copy()
+        else:
+            rgb = cv2.cvtColor(upscaled, cv2.COLOR_BGR2RGB)
+            qimg = QImage(
+                rgb.data, rgb.shape[1], rgb.shape[0],
+                rgb.strides[0], QImage.Format_RGB888,
+            ).copy()
 
         pixmap = QPixmap.fromImage(qimg)
         pixmap = self._draw_overlay(pixmap)
+        pixmap = self._fit_pixmap(pixmap)
         self.setFixedSize(pixmap.size())
         self.setPixmap(pixmap)
+
+    def _fit_pixmap(self, pixmap):
+        if self.max_width and pixmap.width() > self.max_width:
+            pixmap = pixmap.scaledToWidth(self.max_width, Qt.SmoothTransformation)
+        if self.max_height and pixmap.height() > self.max_height:
+            pixmap = pixmap.scaledToHeight(self.max_height, Qt.SmoothTransformation)
+        return pixmap
 
     def _draw_overlay(self, pixmap):
         if not self.in_progress_points and not self.completed_quad:
@@ -113,3 +136,30 @@ class ImageViewer(QLabel):
             self.quad_completed.emit(self.completed_quad)
 
         self._refresh()
+
+
+class RGBViewer(QLabel):
+    """Displays an RGB capture frame exactly as recorded, just scaled to fit
+    the window — no warping, blending, or other processing applied."""
+
+    def __init__(self, max_width=480, parent=None):
+        super().__init__(parent)
+        self.max_width = max_width
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("background-color: #111;")
+
+    def set_frame_bgr(self, bgr_image):
+        if bgr_image is None:
+            self.setText("No RGB frame")
+            self.setPixmap(QPixmap())
+            return
+        rgb_image = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+        h, w = rgb_image.shape[:2]
+        qimg = QImage(
+            rgb_image.data, w, h, rgb_image.strides[0], QImage.Format_RGB888,
+        ).copy()
+        pixmap = QPixmap.fromImage(qimg)
+        if pixmap.width() > self.max_width:
+            pixmap = pixmap.scaledToWidth(self.max_width, Qt.SmoothTransformation)
+        self.setFixedSize(pixmap.size())
+        self.setPixmap(pixmap)

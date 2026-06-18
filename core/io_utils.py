@@ -1,3 +1,4 @@
+import csv
 import json
 import re
 from datetime import datetime
@@ -6,17 +7,9 @@ from pathlib import Path
 import numpy as np
 
 CAPTURE_RE = re.compile(r"^data_capture_(\d+)_(\d+)_(\d+)\.json$")
+CAM_NAME_RE = re.compile(r"cam(\d+)")
 SENSOR_WIDTH = 32
 SENSOR_HEIGHT = 24
-
-
-def list_pair_folders(root):
-    """Subfolders of root that look like a capture session (contain capture JSONs)."""
-    root = Path(root)
-    return sorted(
-        p for p in root.iterdir()
-        if p.is_dir() and any(CAPTURE_RE.match(f.name) for f in p.iterdir())
-    )
 
 
 def discover_camera_ids(pair_folder):
@@ -51,7 +44,11 @@ def list_captures(pair_folder, cam_id):
 
 def load_capture(path):
     with open(path) as f:
-        return json.load(f)
+        text = f.read()
+    # The sensor occasionally emits a non-standard "-nan" token (rather than
+    # JSON's "NaN") during its first few incomplete frames.
+    text = re.sub(r"-nan\b", "NaN", text)
+    return json.loads(text)
 
 
 def build_camera_sequence(pair_folder, cam_id):
@@ -67,7 +64,7 @@ def build_camera_sequence(pair_folder, cam_id):
     for path in paths:
         data = load_capture(path)
         raw = np.array(data["data"], dtype=np.float64)
-        mask = raw != 0
+        mask = (raw != 0) & ~np.isnan(raw)
         buffer[mask] = raw[mask]
         grid = buffer.copy().reshape(SENSOR_HEIGHT, SENSOR_WIDTH)
         sequence.append((data["frame_index"], data["unix_time_ms"], grid))
@@ -116,13 +113,47 @@ def load_homography_json(json_path):
         return json.load(f)
 
 
-def find_homography_json(pair_folder):
-    pair_folder = Path(pair_folder)
-    matches = sorted(pair_folder.glob("*_homography.json"))
-    return matches[0] if matches else None
-
-
 def ensure_dir(path):
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def discover_homography_files(root):
+    """Recursively find every *_homography.json under root (saved calibration
+    pairs may live in their own subfolders) and return the parsed entries."""
+    root = Path(root)
+    entries = []
+    for path in sorted(root.rglob("*_homography.json")):
+        data = load_homography_json(path)
+        cam_a = int(CAM_NAME_RE.match(data["cam_a"]).group(1))
+        cam_b = int(CAM_NAME_RE.match(data["cam_b"]).group(1))
+        H = np.array(data["H"], dtype=np.float64)
+        entries.append({"cam_a": cam_a, "cam_b": cam_b, "H": H, "path": path})
+    return entries
+
+
+def load_sync_table(csv_path):
+    """Parse the capture session's sync.csv into a list of row dicts, in
+    anchor_index order."""
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    rows.sort(key=lambda row: int(row["anchor_index"]))
+    return rows
+
+
+def nearest_rgb_file(sync_rows, frame_idx, column="rgb_files"):
+    """Find the rgb filename for frame_idx, falling back to the closest row
+    (by index distance) that actually has one if this exact frame has no
+    synced RGB capture."""
+    if not sync_rows:
+        return None
+    n = len(sync_rows)
+    frame_idx = max(0, min(frame_idx, n - 1))
+    for offset in range(n):
+        for idx in (frame_idx - offset, frame_idx + offset):
+            if 0 <= idx < n:
+                name = sync_rows[idx].get(column, "")
+                if name:
+                    return name
+    return None

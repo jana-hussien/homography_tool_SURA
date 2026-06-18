@@ -1,34 +1,6 @@
 import numpy as np
 
 from core.homography import warp_image
-from core.io_utils import find_homography_json, load_homography_json
-
-
-def load_chain_homographies(pair_folders_in_order):
-    """Each folder must contain a saved homography JSON. The list must be in
-    camera order (pair_1_2, pair_2_3, ...). Returns H_i mapping cam_i -> cam_(i+1)."""
-    homographies = []
-    for folder in pair_folders_in_order:
-        json_path = find_homography_json(folder)
-        if json_path is None:
-            raise FileNotFoundError(f"No homography JSON found in {folder}")
-        data = load_homography_json(json_path)
-        H = np.array(data["H"], dtype=np.float64)
-        homographies.append(H)
-    return homographies
-
-
-def build_reference_transforms(homographies):
-    """
-    homographies[i] maps cam_(i+1) coordinates -> cam_(i+2) coordinates
-    (homographies[0] = H_12 maps cam1 -> cam2, etc.)
-    Returns transforms[i] mapping camera (i+1) into the cam1 reference frame.
-    """
-    transforms = [np.eye(3)]
-    for H in homographies:
-        H_inv = np.linalg.inv(H)
-        transforms.append(transforms[-1] @ H_inv)
-    return transforms
 
 
 def _transform_corners(width, height, T):
@@ -53,12 +25,58 @@ def compute_canvas_bounds(frame_shapes, transforms):
     return min_x, min_y, max_x, max_y
 
 
+def build_clusters(homography_entries, cam_ids):
+    """Group cam_ids into connected clusters using whatever pairwise
+    homographies are available (cameras with no calibrated neighbor end up
+    in their own size-1 cluster). Each entry's H maps cam_a's coordinates
+    into cam_b's coordinates. Returns a list of dicts: {"cams": [...],
+    "transforms": [...]} where transforms[i] maps cams[i] into the
+    cluster's reference frame (cams[0]).
+
+    Each cluster's reference frame is the first camera in cam_ids (in the
+    given order) that belongs to it — callers that want a specific camera
+    to be the reference should put it first in cam_ids (see
+    OrderCamerasDialog), since chaining fewer hops from the reference
+    compounds less per-pair calibration error."""
+    graph = {cam: [] for cam in cam_ids}
+    for entry in homography_entries:
+        a, b, H = entry["cam_a"], entry["cam_b"], entry["H"]
+        if a not in graph or b not in graph:
+            continue
+        graph[a].append((b, np.linalg.inv(H)))  # maps b -> a
+        graph[b].append((a, H))                  # maps a -> b
+
+    visited = set()
+    clusters = []
+    for root_cam in cam_ids:
+        if root_cam in visited:
+            continue
+        visited.add(root_cam)
+        cams = [root_cam]
+        transforms = [np.eye(3)]
+        transform_to_root = {root_cam: np.eye(3)}
+        queue = [root_cam]
+        while queue:
+            current = queue.pop(0)
+            for neighbor, T_neighbor_to_current in graph[current]:
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                transform_to_root[neighbor] = transform_to_root[current] @ T_neighbor_to_current
+                cams.append(neighbor)
+                transforms.append(transform_to_root[neighbor])
+                queue.append(neighbor)
+        clusters.append({"cams": cams, "transforms": transforms})
+    return clusters
+
+
 def stitch_frames(frames, transforms):
     """
-    frames: list of grayscale np arrays, one per camera, same sync index.
+    frames: list of single-channel np arrays (uint8 display frames, or
+    float32 raw temperature grids), one per camera, same sync index.
     transforms: list of 3x3 homographies mapping each camera into the cam1 frame.
-    Returns the stitched panorama as a uint8 grayscale image, black-filled where
-    no camera has coverage.
+    Returns the stitched panorama in the same dtype as the input frames,
+    zero-filled where no camera has coverage.
     """
     shapes = [f.shape for f in frames]
     min_x, min_y, max_x, max_y = compute_canvas_bounds(shapes, transforms)
@@ -71,7 +89,7 @@ def stitch_frames(frames, transforms):
         [0, 0, 1],
     ], dtype=np.float64)
 
-    canvas = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
+    canvas = np.zeros((canvas_h, canvas_w), dtype=frames[0].dtype)
 
     for frame, T in zip(frames, transforms):
         full_T = translation @ T
