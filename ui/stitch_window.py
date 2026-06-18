@@ -3,8 +3,8 @@ from pathlib import Path
 import cv2
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QDialog, QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, QSlider,
-    QVBoxLayout,
+    QDialog, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
+    QPushButton, QSlider, QVBoxLayout,
 )
 
 from core.io_utils import (
@@ -13,6 +13,70 @@ from core.io_utils import (
 )
 from core.stitcher import build_reference_transforms, load_chain_homographies, stitch_frames
 from ui.viewer import ImageViewer
+
+
+class OrderPairsDialog(QDialog):
+    """Dialog to let the user arrange pair folders in stitch order."""
+    
+    def __init__(self, pair_folders, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Order Pair Folders")
+        self.resize(400, 300)
+        self.pair_folders = pair_folders
+        self.result = None
+        
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Arrange pairs in stitch order (top to bottom):\nUse Up/Down buttons to reorder."))
+        
+        self.list_widget = QListWidget()
+        for pf in pair_folders:
+            item = QListWidgetItem(pf.name)
+            item.setData(Qt.UserRole, str(pf))
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget)
+        
+        button_layout = QHBoxLayout()
+        
+        up_btn = QPushButton("↑ Move Up")
+        up_btn.clicked.connect(self.move_up)
+        button_layout.addWidget(up_btn)
+        
+        down_btn = QPushButton("↓ Move Down")
+        down_btn.clicked.connect(self.move_down)
+        button_layout.addWidget(down_btn)
+        
+        layout.addLayout(button_layout)
+        
+        confirm_layout = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        confirm_layout.addWidget(ok_btn)
+        confirm_layout.addWidget(cancel_btn)
+        layout.addLayout(confirm_layout)
+    
+    def move_up(self):
+        row = self.list_widget.currentRow()
+        if row > 0:
+            item = self.list_widget.takeItem(row)
+            self.list_widget.insertItem(row - 1, item)
+            self.list_widget.setCurrentRow(row - 1)
+    
+    def move_down(self):
+        row = self.list_widget.currentRow()
+        if row < self.list_widget.count() - 1:
+            item = self.list_widget.takeItem(row)
+            self.list_widget.insertItem(row + 1, item)
+            self.list_widget.setCurrentRow(row + 1)
+    
+    def accept(self):
+        self.result = []
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            path_str = item.data(Qt.UserRole)
+            self.result.append(Path(path_str))
+        super().accept()
 
 
 class StitchWindow(QDialog):
@@ -74,25 +138,26 @@ class StitchWindow(QDialog):
         if not pair_folders:
             raise ValueError(f"No capture-session folders found in {root}")
 
-        # Map each adjacent camera-id pair to the session folder that recorded it.
-        pairs_by_ids = {}
-        for pf in pair_folders:
-            cam_a_id, cam_b_id = detect_pair_cameras(pf)
-            pairs_by_ids[(cam_a_id, cam_b_id)] = pf
+        # Let user order the pairs
+        dialog = OrderPairsDialog(pair_folders, self)
+        if dialog.exec_() != QDialog.Accepted or not dialog.result:
+            return
+        ordered_pair_folders = dialog.result
 
-        ordered_pairs = sorted(pairs_by_ids.keys())
-        cam_ids = [ordered_pairs[0][0]] + [b for _a, b in ordered_pairs]
-        expected_pairs = list(zip(cam_ids[:-1], cam_ids[1:]))
-        if expected_pairs != ordered_pairs:
-            raise ValueError(
-                f"Camera pairs are not a contiguous chain: found {ordered_pairs}, "
-                f"expected something like {expected_pairs}"
-            )
-        ordered_pair_folders = [pairs_by_ids[p] for p in ordered_pairs]
+        # Extract camera IDs from each pair in the selected order
+        cam_ids = []
+        pairs_to_ids = {}
+        for pf in ordered_pair_folders:
+            cam_a_id, cam_b_id = detect_pair_cameras(pf)
+            pairs_to_ids[str(pf)] = (cam_a_id, cam_b_id)
+            if not cam_ids:
+                cam_ids.append(cam_a_id)
+            cam_ids.append(cam_b_id)
 
         homographies = load_chain_homographies(ordered_pair_folders)
         self.transforms = build_reference_transforms(homographies)
 
+        # Load sequences in the selected order
         # cam 0's frames come from the first pair folder (as cam_a); every other
         # camera's frames come from the pair folder that recorded it as cam_b.
         sequences = []
