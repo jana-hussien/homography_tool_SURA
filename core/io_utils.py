@@ -4,6 +4,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 CAPTURE_RE = re.compile(r"^data_capture_(\d+)_(\d+)_(\d+)\.json$")
@@ -66,10 +67,38 @@ def build_camera_sequence(pair_folder, cam_id):
         raw = np.array(data["data"], dtype=np.float64)
         mask = (raw != 0) & ~np.isnan(raw)
         buffer[mask] = raw[mask]
-        grid = buffer.copy().reshape(SENSOR_HEIGHT, SENSOR_WIDTH)
+        # The sensor reads out mirrored relative to the camera's actual
+        # field of view; flip horizontally so frames, quad selections, and
+        # stitched homographies all agree with what the camera physically sees.
+        grid = np.ascontiguousarray(buffer.reshape(SENSOR_HEIGHT, SENSOR_WIDTH)[:, ::-1])
         sequence.append((data["frame_index"], data["unix_time_ms"], grid))
 
     return sequence
+
+
+def align_camera_sequences(sequences):
+    """Given cam_id -> list of (frame_index, unix_time_ms, grid) (as returned
+    by build_camera_sequence), restrict every camera to only the frame_index
+    values present in *all* cameras, sorted ascending, so position i in every
+    camera's output list is guaranteed to be the same captured moment.
+
+    Without this, zipping sequences by list position silently misaligns
+    cameras as soon as any one of them is missing a different set of frames
+    than the others (e.g. after deleting corrupt/empty captures one by one
+    per camera) — the lists are the same length by luck, not by frame_index.
+    """
+    grids_by_index = {}
+    common_indices = None
+    for cam_id, seq in sequences.items():
+        grids_by_index[cam_id] = {frame_index: grid for frame_index, _ts, grid in seq}
+        indices = set(grids_by_index[cam_id].keys())
+        common_indices = indices if common_indices is None else common_indices & indices
+
+    common_indices = sorted(common_indices or [])
+    return {
+        cam_id: [grids[idx] for idx in common_indices]
+        for cam_id, grids in grids_by_index.items()
+    }
 
 
 def compute_normalization_range(grids, low_pct=1, high_pct=99):
@@ -83,6 +112,14 @@ def compute_normalization_range(grids, low_pct=1, high_pct=99):
 def temps_to_uint8(grid, vmin, vmax):
     scaled = (grid - vmin) / (vmax - vmin) * 255.0
     return np.clip(scaled, 0, 255).astype(np.uint8)
+
+
+def heatmap_from_uint8(gray):
+    """Colorize a normalized uint8 thermal frame with a JET colormap, keeping
+    zero-valued (no-coverage) pixels black rather than "cold blue"."""
+    colored = cv2.applyColorMap(gray, cv2.COLORMAP_JET)
+    colored[gray == 0] = (0, 0, 0)
+    return colored
 
 
 def save_homography(pair_folder, pair_name, cam_a_name, cam_b_name, quad_a, quad_b, H):
@@ -121,16 +158,62 @@ def ensure_dir(path):
 
 def discover_homography_files(root):
     """Recursively find every *_homography.json under root (saved calibration
-    pairs may live in their own subfolders) and return the parsed entries."""
+    pairs may live in their own subfolders) and return the parsed entries.
+
+    Only thermal-to-thermal pairs (cam_a/cam_b both "camN") are returned, since
+    this feeds the thermal stitching graph in core.stitcher.build_clusters,
+    which keys everything by integer cam id. Other calibration files that may
+    live alongside these (e.g. an RGB<->thermal "rgb"/"camN" pair saved by
+    ui.rgb_calibration_window) are silently skipped rather than crashing.
+    """
     root = Path(root)
     entries = []
     for path in sorted(root.rglob("*_homography.json")):
         data = load_homography_json(path)
-        cam_a = int(CAM_NAME_RE.match(data["cam_a"]).group(1))
-        cam_b = int(CAM_NAME_RE.match(data["cam_b"]).group(1))
+        match_a = CAM_NAME_RE.match(data["cam_a"])
+        match_b = CAM_NAME_RE.match(data["cam_b"])
+        if not match_a or not match_b:
+            continue
+        cam_a = int(match_a.group(1))
+        cam_b = int(match_b.group(1))
         H = np.array(data["H"], dtype=np.float64)
         entries.append({"cam_a": cam_a, "cam_b": cam_b, "H": H, "path": path})
     return entries
+
+
+def discover_capture_session(session_folder):
+    """Given a parent session folder (e.g. one containing a thermal-*/
+    subfolder with capture JSONs, an rgb-*/ subfolder of images, and a
+    sync.csv), auto-detect each piece by content rather than by name so
+    the folders can be named anything. Returns
+    (capture_folder, rgb_folder, sync_csv_path); the latter two may be
+    None if not found. Raises ValueError if no capture JSONs are found
+    anywhere under session_folder.
+    """
+    session_folder = Path(session_folder)
+
+    capture_folder = None
+    rgb_folder = None
+    for child in sorted(session_folder.iterdir()):
+        if not child.is_dir():
+            continue
+        if discover_camera_ids(child):
+            capture_folder = child
+        elif any(f.suffix.lower() in (".jpg", ".jpeg", ".png") for f in child.iterdir() if f.is_file()):
+            rgb_folder = child
+
+    if capture_folder is None and discover_camera_ids(session_folder):
+        capture_folder = session_folder
+
+    if capture_folder is None:
+        raise ValueError(f"No thermal capture JSONs found under {session_folder}")
+
+    sync_csv = session_folder / "sync.csv"
+    if not sync_csv.exists():
+        matches = list(session_folder.rglob("sync.csv"))
+        sync_csv = matches[0] if matches else None
+
+    return capture_folder, rgb_folder, sync_csv
 
 
 def load_sync_table(csv_path):

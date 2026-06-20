@@ -5,12 +5,13 @@ import numpy as np
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QDialog, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QSlider, QVBoxLayout,
+    QMessageBox, QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget,
 )
 
 from core.io_utils import (
-    build_camera_sequence, compute_normalization_range, discover_camera_ids,
-    discover_homography_files, ensure_dir, load_sync_table, nearest_rgb_file, temps_to_uint8,
+    align_camera_sequences, build_camera_sequence, compute_normalization_range,
+    discover_camera_ids, discover_capture_session, discover_homography_files, ensure_dir,
+    heatmap_from_uint8, load_sync_table, nearest_rgb_file, temps_to_uint8,
 )
 from core.stitcher import build_clusters, stitch_frames
 from ui.viewer import ImageViewer, RGBViewer
@@ -99,9 +100,11 @@ class CaptureStitchWindow(QDialog):
         self.sync_rows = []
 
         self.cam_ids = []
-        self.cam_order = []  # user-controlled order; first cam per cluster becomes the reference
+        # user-controlled order; first cam per cluster becomes the reference.
+        # Default to the rig's usual chaining order; falls back to ascending
+        # cam_ids in _build() if the loaded session's cams don't match this set.
+        self.cam_order = [6, 4, 5, 2, 3]
         self.cam_grid_sequences = {}  # cam_id -> list of grids
-        self.cam_norms = {}  # cam_id -> (vmin, vmax)
         self.homography_entries = []
         self.clusters = []
         self.frame_count = 0
@@ -118,18 +121,15 @@ class CaptureStitchWindow(QDialog):
 
         select_group = QGroupBox("Sources")
         select_layout = QVBoxLayout(select_group)
-        self.capture_label = self._add_select_row(
-            select_layout, "Select Thermal Capture Folder...", self.select_capture_folder,
+        self.session_label = self._add_select_row(
+            select_layout, "Select Capture Session Folder...", self.select_session_folder,
         )
         self.homography_label = self._add_select_row(
             select_layout, "Select Homography Folder...", self.select_homography_folder,
         )
-        self.rgb_label = self._add_select_row(
-            select_layout, "Select RGB Folder...", self.select_rgb_folder,
-        )
-        self.sync_label = self._add_select_row(
-            select_layout, "Select sync.csv...", self.select_sync_csv,
-        )
+        self.capture_label = self._add_display_row(select_layout, "Thermal:")
+        self.rgb_label = self._add_display_row(select_layout, "RGB:")
+        self.sync_label = self._add_display_row(select_layout, "Sync:")
         layout.addWidget(select_group)
 
         self.reorder_button = QPushButton("Reorder Cameras...")
@@ -140,8 +140,16 @@ class CaptureStitchWindow(QDialog):
         self.status_label = QLabel("Select a thermal capture folder and a homography folder to begin.")
         layout.addWidget(self.status_label)
 
-        self.viewers_layout = QHBoxLayout()
-        layout.addLayout(self.viewers_layout)
+        # The number of cluster viewers (and their size) depends on how many
+        # cameras/pairs are loaded, so their combined width can exceed the
+        # dialog/screen. A scroll area lets the dialog stay resizable to fit
+        # the screen instead of forcing the window past it or clipping content.
+        viewers_container = QWidget()
+        self.viewers_layout = QHBoxLayout(viewers_container)
+        viewers_scroll = QScrollArea()
+        viewers_scroll.setWidgetResizable(True)
+        viewers_scroll.setWidget(viewers_container)
+        layout.addWidget(viewers_scroll)
 
         self.rgb_viewer = RGBViewer()
         rgb_box = QVBoxLayout()
@@ -183,15 +191,48 @@ class CaptureStitchWindow(QDialog):
         parent_layout.addLayout(row)
         return label
 
+    def _add_display_row(self, parent_layout, prefix_text):
+        row = QHBoxLayout()
+        row.addWidget(QLabel(prefix_text))
+        label = QLabel("Not selected")
+        row.addWidget(label)
+        parent_layout.addLayout(row)
+        return label
+
     # ---- source selection ----
 
-    def select_capture_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Thermal Capture Folder")
+    def select_session_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Capture Session Folder")
         if not folder:
             return
-        self.capture_folder = Path(folder)
-        self.capture_label.setText(str(self.capture_folder))
+        self.session_label.setText(folder)
+
+        try:
+            capture_folder, rgb_folder, sync_csv = discover_capture_session(folder)
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", str(exc))
+            return
+
+        self.capture_folder = capture_folder
+        self.capture_label.setText(str(capture_folder))
+
+        self.rgb_folder = rgb_folder
+        self.rgb_label.setText(str(rgb_folder) if rgb_folder else "Not found")
+
+        if sync_csv:
+            try:
+                self.sync_rows = load_sync_table(sync_csv)
+                self.sync_label.setText(str(sync_csv))
+            except Exception as exc:
+                QMessageBox.critical(self, "Error", str(exc))
+                self.sync_rows = []
+                self.sync_label.setText("Not found")
+        else:
+            self.sync_rows = []
+            self.sync_label.setText("Not found")
+
         self._try_build()
+        self._refresh_rgb(self.slider.value())
 
     def select_homography_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Homography Folder")
@@ -200,26 +241,6 @@ class CaptureStitchWindow(QDialog):
         self.homography_folder = Path(folder)
         self.homography_label.setText(str(self.homography_folder))
         self._try_build()
-
-    def select_rgb_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select RGB Folder")
-        if not folder:
-            return
-        self.rgb_folder = Path(folder)
-        self.rgb_label.setText(str(self.rgb_folder))
-        self._refresh_rgb(self.slider.value())
-
-    def select_sync_csv(self):
-        path, _filter = QFileDialog.getOpenFileName(self, "Select sync.csv", filter="CSV files (*.csv)")
-        if not path:
-            return
-        try:
-            self.sync_rows = load_sync_table(path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Error", str(exc))
-            return
-        self.sync_label.setText(path)
-        self._refresh_rgb(self.slider.value())
 
     def reorder_cameras(self):
         dialog = OrderCamerasDialog(self.cam_order or self.cam_ids, self)
@@ -251,10 +272,8 @@ class CaptureStitchWindow(QDialog):
         if not homography_entries:
             raise ValueError(f"No *_homography.json files found under {self.homography_folder}")
 
-        sequences = {}
-        for cam_id in cam_ids:
-            raw_seq = build_camera_sequence(self.capture_folder, cam_id)
-            sequences[cam_id] = [grid for _idx, _ts, grid in raw_seq]
+        raw_sequences = {cam_id: build_camera_sequence(self.capture_folder, cam_id) for cam_id in cam_ids}
+        sequences = align_camera_sequences(raw_sequences)
 
         self.cam_ids = cam_ids
         if set(self.cam_order) != set(cam_ids):
@@ -262,19 +281,6 @@ class CaptureStitchWindow(QDialog):
         self.cam_grid_sequences = sequences
         self.homography_entries = homography_entries
         self.clusters = build_clusters(homography_entries, self.cam_order)
-
-        # Normalize every camera within a cluster together (one shared
-        # vmin/vmax), instead of each camera auto-contrasting to its own
-        # range. Otherwise the same real temperature maps to a different
-        # brightness in each camera, leaving a visible block-shaped seam
-        # at the boundary between cameras in the stitched panorama.
-        norms = {}
-        for cluster in self.clusters:
-            pooled_grids = [grid for cam_id in cluster["cams"] for grid in sequences[cam_id]]
-            shared_range = compute_normalization_range(pooled_grids)
-            for cam_id in cluster["cams"]:
-                norms[cam_id] = shared_range
-        self.cam_norms = norms
 
         self.frame_count = min(len(seq) for seq in sequences.values())
 
@@ -318,25 +324,23 @@ class CaptureStitchWindow(QDialog):
 
     # ---- preview ----
 
-    @staticmethod
-    def _heatmap(gray):
-        colored = cv2.applyColorMap(gray, cv2.COLORMAP_JET)
-        colored[gray == 0] = (0, 0, 0)  # keep no-coverage areas black, not "cold blue"
-        return colored
-
     def _compute_cluster_composites(self, idx):
         composites = []
         for cluster in self.clusters:
-            frames = []
-            for cam_id in cluster["cams"]:
-                grid = self.cam_grid_sequences[cam_id][idx]
-                vmin, vmax = self.cam_norms[cam_id]
-                frames.append(temps_to_uint8(grid, vmin, vmax))
+            # Normalize every camera in the cluster together (one shared
+            # vmin/vmax), but recompute it per frame instead of over the
+            # whole session, so the heatmap always shows contrast relative
+            # to what's currently in view rather than washing out to one
+            # end of the scale when the ambient temperature shifts (e.g.
+            # moving from indoors to outdoors).
+            grids = [self.cam_grid_sequences[cam_id][idx] for cam_id in cluster["cams"]]
+            vmin, vmax = compute_normalization_range(grids)
+            frames = [temps_to_uint8(grid, vmin, vmax) for grid in grids]
             if len(frames) > 1:
                 composite = stitch_frames(frames, cluster["transforms"])
             else:
                 composite = frames[0]
-            composites.append(self._heatmap(composite))
+            composites.append(heatmap_from_uint8(composite))
         return composites
 
     def _compute_cluster_float_composites(self, idx):

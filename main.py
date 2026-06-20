@@ -12,11 +12,12 @@ from PyQt5.QtWidgets import (
 
 from core.homography import blend_images, compute_homography, warp_image
 from core.io_utils import (
-    build_camera_sequence, compute_normalization_range, detect_pair_cameras, ensure_dir,
-    save_homography, temps_to_uint8,
+    align_camera_sequences, build_camera_sequence, compute_normalization_range,
+    detect_pair_cameras, ensure_dir, save_homography, temps_to_uint8,
 )
 from ui.controls import ControlPanel
 from ui.stitch_window import CaptureStitchWindow
+from ui.rgb_calibration_window import RGBCalibrationWindow
 from ui.viewer import ImageViewer
 
 DISPLAY_SCALE = 12
@@ -31,8 +32,6 @@ class MainWindow(QMainWindow):
         self.cam_b_name = None
         self.cam_a_grids = []
         self.cam_b_grids = []
-        self.norm_a = (0.0, 1.0)
-        self.norm_b = (0.0, 1.0)
         self.frame_count = 0
         self.current_idx = 0
         self.H = None
@@ -94,6 +93,7 @@ class MainWindow(QMainWindow):
         self.control_panel.save_clicked.connect(self.on_save_clicked)
         self.control_panel.generate_examples_clicked.connect(self.on_generate_examples_clicked)
         self.control_panel.capture_stitch_mode_clicked.connect(self.open_capture_stitch_window)
+        self.control_panel.rgb_calibration_clicked.connect(self.open_rgb_calibration_window)
         self.control_panel.play_toggled.connect(self.on_play_toggled)
         self.control_panel.preview_toggled.connect(self.on_preview_toggled)
         body_layout.addWidget(self.control_panel)
@@ -118,10 +118,13 @@ class MainWindow(QMainWindow):
         seq_a = build_camera_sequence(pair_folder, cam_a_id)
         seq_b = build_camera_sequence(pair_folder, cam_b_id)
 
-        self.cam_a_grids = [grid for _idx, _ts, grid in seq_a]
-        self.cam_b_grids = [grid for _idx, _ts, grid in seq_b]
-        self.norm_a = compute_normalization_range(self.cam_a_grids)
-        self.norm_b = compute_normalization_range(self.cam_b_grids)
+        # Align by each frame's recorded frame_index rather than zipping by
+        # list position, so a frame missing from only one camera (e.g. a
+        # corrupt/empty capture that got removed) doesn't silently shift
+        # every later frame out of sync between cam A and cam B.
+        aligned = align_camera_sequences({cam_a_id: seq_a, cam_b_id: seq_b})
+        self.cam_a_grids = aligned[cam_a_id]
+        self.cam_b_grids = aligned[cam_b_id]
 
         self.pair_folder = pair_folder
         self.pair_name = f"{cam_a_id}{cam_b_id}"
@@ -155,11 +158,20 @@ class MainWindow(QMainWindow):
 
     # ---- frame navigation ----
 
+    def _frame_norm(self, idx):
+        # Shared between cam A and cam B (rather than each auto-contrasting
+        # to its own range) and recomputed per frame (rather than over the
+        # whole pair sequence), matching the stitched capture preview: keeps
+        # the two cameras' brightness comparable while showing contrast
+        # relative to what's currently in view instead of washing out when
+        # the ambient temperature drifts over a long recording.
+        return compute_normalization_range([self.cam_a_grids[idx], self.cam_b_grids[idx]])
+
     def get_frame_a(self, idx):
-        return temps_to_uint8(self.cam_a_grids[idx], *self.norm_a)
+        return temps_to_uint8(self.cam_a_grids[idx], *self._frame_norm(idx))
 
     def get_frame_b(self, idx):
-        return temps_to_uint8(self.cam_b_grids[idx], *self.norm_b)
+        return temps_to_uint8(self.cam_b_grids[idx], *self._frame_norm(idx))
 
     def show_frame(self, idx):
         if self.frame_count == 0:
@@ -211,7 +223,6 @@ class MainWindow(QMainWindow):
             return
         self.cam_a_name, self.cam_b_name = self.cam_b_name, self.cam_a_name
         self.cam_a_grids, self.cam_b_grids = self.cam_b_grids, self.cam_a_grids
-        self.norm_a, self.norm_b = self.norm_b, self.norm_a
 
         cam_a_id = int(re.search(r"\d+", self.cam_a_name).group())
         cam_b_id = int(re.search(r"\d+", self.cam_b_name).group())
@@ -414,6 +425,10 @@ class MainWindow(QMainWindow):
 
     def open_capture_stitch_window(self):
         dialog = CaptureStitchWindow(self)
+        dialog.exec_()
+
+    def open_rgb_calibration_window(self):
+        dialog = RGBCalibrationWindow(self)
         dialog.exec_()
 
 

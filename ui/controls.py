@@ -14,6 +14,7 @@ class ControlPanel(QWidget):
     save_clicked = pyqtSignal()
     generate_examples_clicked = pyqtSignal()
     capture_stitch_mode_clicked = pyqtSignal()
+    rgb_calibration_clicked = pyqtSignal()
     swap_cameras_clicked = pyqtSignal()
     play_toggled = pyqtSignal(bool)
     preview_toggled = pyqtSignal(bool)
@@ -107,6 +108,10 @@ class ControlPanel(QWidget):
         self.capture_stitch_button = QPushButton("Stitch Real Capture + RGB...")
         self.capture_stitch_button.clicked.connect(self.capture_stitch_mode_clicked.emit)
         stitch_layout.addWidget(self.capture_stitch_button)
+
+        self.rgb_calibration_button = QPushButton("Calibrate RGB <-> Thermal...")
+        self.rgb_calibration_button.clicked.connect(self.rgb_calibration_clicked.emit)
+        stitch_layout.addWidget(self.rgb_calibration_button)
 
         layout.addWidget(stitch_group)
 
