@@ -10,7 +10,9 @@ from PyQt5.QtWidgets import (
     QPushButton, QSlider, QVBoxLayout, QWidget,
 )
 
-from core.homography import blend_images, compute_homography, warp_image
+from core.homography import (
+    blend_images, check_consistent_handedness, compute_homography, warp_image,
+)
 from core.io_utils import (
     align_camera_sequences, build_camera_sequence, compute_normalization_range,
     detect_pair_cameras, ensure_dir, save_homography, temps_to_uint8,
@@ -326,10 +328,25 @@ class MainWindow(QMainWindow):
     # ---- save / export ----
 
     def on_save_clicked(self):
+        quad_a = self.viewer_a.completed_quad or []
+        quad_b = self.viewer_b.completed_quad or []
+        if quad_a and quad_b and not check_consistent_handedness(quad_a, quad_b):
+            proceed = QMessageBox.warning(
+                self, "Possible Mirrored Homography",
+                "The two quads have opposite rotational handedness (clockwise on one "
+                "image, counter-clockwise on the other). This strongly suggests the "
+                "resulting homography is a mirror of reality rather than a match to "
+                "it, even though each quad individually looks like a clean rectangle. "
+                "Double-check both frames' orientation and that points were clicked "
+                "in the same rotational direction on both.\n\nSave anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if proceed != QMessageBox.Yes:
+                return
         try:
             json_path, npy_path = save_homography(
                 self.pair_folder, self.pair_name, self.cam_a_name, self.cam_b_name,
-                self.viewer_a.completed_quad or [], self.viewer_b.completed_quad or [], self.H,
+                quad_a, quad_b, self.H,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Save Error", str(exc))

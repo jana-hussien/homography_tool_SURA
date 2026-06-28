@@ -46,7 +46,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QSlider, QVBoxLayout,
 )
 
-from core.homography import compute_homography
+from core.homography import check_consistent_handedness, compute_homography
 from core.io_utils import (
     build_camera_sequence, compute_normalization_range, discover_camera_ids,
     discover_capture_session, ensure_dir, load_sync_table, nearest_rgb_file,
@@ -400,12 +400,28 @@ class RGBCalibrationWindow(QDialog):
         self.status_label.setText(f"Homography computed (RGB -> cam{self.thermal_port}). Ready to save.")
 
     def on_save_clicked(self):
+        quad_rgb = self.rgb_viewer.completed_quad or []
+        quad_thermal = self.thermal_viewer.completed_quad or []
+        if quad_rgb and quad_thermal and not check_consistent_handedness(quad_rgb, quad_thermal):
+            proceed = QMessageBox.warning(
+                self, "Possible Mirrored Homography",
+                "The RGB and thermal quads have opposite rotational handedness "
+                "(clockwise on one image, counter-clockwise on the other). This "
+                "strongly suggests the resulting homography is a mirror of reality "
+                "rather than a match to it, even though each quad individually looks "
+                "like a clean rectangle. Double-check both frames' orientation and "
+                "that points were clicked in the same rotational direction on both.\n\n"
+                "Save anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if proceed != QMessageBox.Yes:
+                return
         out_dir = ensure_dir(self.session_folder)
         pair_name = f"rgb{self.thermal_port}"
         try:
             json_path, npy_path = save_homography(
                 out_dir, pair_name, "rgb", f"cam{self.thermal_port}",
-                self.rgb_viewer.completed_quad or [], self.thermal_viewer.completed_quad or [], self.H,
+                quad_rgb, quad_thermal, self.H,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Save Error", str(exc))

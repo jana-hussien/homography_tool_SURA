@@ -4,8 +4,8 @@ import cv2
 import numpy as np
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
-    QDialog, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMessageBox, QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QListWidget,
+    QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget,
 )
 
 from core.io_utils import (
@@ -171,6 +171,10 @@ class CaptureStitchWindow(QDialog):
         layout.addLayout(slider_layout)
 
         save_layout = QHBoxLayout()
+        save_layout.addWidget(QLabel("Save cluster:"))
+        self.save_cluster_combo = QComboBox()
+        self.save_cluster_combo.setEnabled(False)
+        save_layout.addWidget(self.save_cluster_combo)
         self.save_button = QPushButton("Save Current Merged Frame")
         self.save_button.setEnabled(False)
         self.save_button.clicked.connect(self.save_current_merged)
@@ -251,6 +255,7 @@ class CaptureStitchWindow(QDialog):
             return
         self.clusters = build_clusters(self.homography_entries, self.cam_order)
         self._rebuild_cluster_viewers()
+        self._rebuild_save_cluster_combo()
         self.update_preview(self.slider.value())
 
     # ---- building clusters from capture + homography ----
@@ -288,7 +293,9 @@ class CaptureStitchWindow(QDialog):
         self.play_button.setEnabled(True)
         self.save_button.setEnabled(True)
         self.save_all_button.setEnabled(True)
+        self.save_cluster_combo.setEnabled(True)
         self._rebuild_cluster_viewers()
+        self._rebuild_save_cluster_combo()
 
         unmatched = [c["cams"][0] for c in self.clusters if len(c["cams"]) == 1]
         status = f"{len(cam_ids)} cameras, {len(self.clusters)} cluster(s)."
@@ -321,6 +328,17 @@ class CaptureStitchWindow(QDialog):
             self.viewers_layout.insertLayout(i, box)
             self.cluster_labels.append(label)
             self.cluster_viewers.append(viewer)
+
+    def _rebuild_save_cluster_combo(self):
+        previous_tag = self.save_cluster_combo.currentData()
+        self.save_cluster_combo.clear()
+        for cluster in self.clusters:
+            tag = self._cluster_filename_tag(cluster)
+            self.save_cluster_combo.addItem(tag, tag)
+        if previous_tag is not None:
+            idx = self.save_cluster_combo.findData(previous_tag)
+            if idx >= 0:
+                self.save_cluster_combo.setCurrentIndex(idx)
 
     # ---- preview ----
 
@@ -400,25 +418,42 @@ class CaptureStitchWindow(QDialog):
     def _cluster_filename_tag(self, cluster):
         return "+".join(f"cam{c}" for c in cluster["cams"])
 
+    def _selected_cluster(self):
+        tag = self.save_cluster_combo.currentData()
+        if tag is None:
+            return None
+        for cluster in self.clusters:
+            if self._cluster_filename_tag(cluster) == tag:
+                return cluster
+        return None
+
     def save_current_merged(self):
+        cluster = self._selected_cluster()
+        if cluster is None:
+            QMessageBox.warning(self, "No Cluster Selected", "Choose a cluster to save first.")
+            return
+        cluster_idx = self.clusters.index(cluster)
         idx = self.slider.value()
         out_dir = ensure_dir(self.capture_folder / "stitched_output")
-        float_composites = self._compute_cluster_float_composites(idx)
-        for cluster, float_composite in zip(self.clusters, float_composites):
-            tag = self._cluster_filename_tag(cluster)
-            out_path = out_dir / f"{tag}_frame_{idx + 1:04d}.npy"
-            np.save(out_path, float_composite)
-        QMessageBox.information(self, "Saved", f"Saved frame {idx + 1} (float temperatures) to {out_dir}")
+        float_composite = self._compute_cluster_float_composites(idx)[cluster_idx]
+        tag = self._cluster_filename_tag(cluster)
+        out_path = out_dir / f"{tag}_frame_{idx + 1:04d}.npy"
+        np.save(out_path, float_composite)
+        QMessageBox.information(self, "Saved", f"Saved frame {idx + 1} (float temperatures) to {out_path}")
 
     def save_all_merged(self):
+        cluster = self._selected_cluster()
+        if cluster is None:
+            QMessageBox.warning(self, "No Cluster Selected", "Choose a cluster to save first.")
+            return
+        cluster_idx = self.clusters.index(cluster)
         out_dir = ensure_dir(self.capture_folder / "stitched_output")
+        tag = self._cluster_filename_tag(cluster)
         for idx in range(self.frame_count):
-            float_composites = self._compute_cluster_float_composites(idx)
-            for cluster, float_composite in zip(self.clusters, float_composites):
-                tag = self._cluster_filename_tag(cluster)
-                out_path = out_dir / f"{tag}_frame_{idx + 1:04d}.npy"
-                np.save(out_path, float_composite)
+            float_composite = self._compute_cluster_float_composites(idx)[cluster_idx]
+            out_path = out_dir / f"{tag}_frame_{idx + 1:04d}.npy"
+            np.save(out_path, float_composite)
         QMessageBox.information(
             self, "Saved",
-            f"Saved {self.frame_count} frame(s) per cluster (float temperatures) to {out_dir}",
+            f"Saved {self.frame_count} frame(s) for {tag} (float temperatures) to {out_dir}",
         )
